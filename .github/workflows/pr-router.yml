@@ -1,0 +1,143 @@
+name: pr-router
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-router-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  route:
+    name: route
+    runs-on: ubuntu-latest
+    steps:
+      - name: Classify PR risk and labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_ACTION: ${{ github.event.action }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          set -euo pipefail
+
+          ensure_label() {
+            gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null 2>&1 || true
+          }
+
+          ensure_label "risk:low" "0e8a16" "Router classified this PR as low risk."
+          ensure_label "risk:medium" "fbca04" "Router classified this PR as medium risk."
+          ensure_label "risk:high" "d93f0b" "Router classified this PR as high risk."
+          ensure_label "risk:cross-repo" "5319e7" "PR affects contracts or behavior shared across Centurion repos."
+          ensure_label "needs:contract-review" "5319e7" "Requires source-build or platform compatibility review."
+          ensure_label "needs:security-review" "b60205" "Requires signing, trust, secret, or security review."
+          ensure_label "needs:release-review" "1d76db" "Requires binary, checksum, release, or publishing review."
+          ensure_label "needs:ci-review" "c5def5" "Requires CI/build workflow review."
+          ensure_label "agent-review:pending" "fbca04" "Waiting for Layer 2 review or router disposition."
+          ensure_label "agent-review:run" "b60205" "Local Layer 2 runner should review this PR."
+          ensure_label "agent-review:router-only" "0e8a16" "Low-risk PR; router-only review is enough unless requested."
+          ensure_label "agent-review:approved" "0e8a16" "Layer 2 approved the current head commit."
+          ensure_label "agent-review:changes-requested" "d93f0b" "Layer 2 requested changes."
+          ensure_label "agent-review:needs-human" "d93f0b" "Layer 2 requires a human decision."
+          ensure_label "agent-review:disputed" "fbca04" "A Layer 2 finding is disputed and needs adjudication."
+
+          gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only > /tmp/changed-files.txt || true
+          total="$(grep -cve '^[[:space:]]*$' /tmp/changed-files.txt || true)"
+
+          risk="medium"
+          needs_contract="false"
+          needs_security="false"
+          needs_release="false"
+          needs_ci="false"
+
+          if [ "$total" = "0" ]; then
+            risk="low"
+          elif awk 'NF && $0 !~ /^docs\/|\.md$|^README\.md$|^NOTICE$|^LICENSE$/ { bad=1 } END { exit bad ? 0 : 1 }' /tmp/changed-files.txt; then
+            risk="high"
+            needs_release="true"
+          else
+            risk="low"
+          fi
+
+          if grep -Eiq '(checksum|sha256|signature|signed|signing|certificate|msi|exe|zip|artifact|binary|download|latest|release|installer|license|terms)' /tmp/changed-files.txt; then
+            risk="high"
+            needs_release="true"
+          fi
+
+          if grep -Eiq '(source|provenance|centurion-agent|centurion-platform|commit|gateway|download)' /tmp/changed-files.txt; then
+            if [ "$risk" != "high" ]; then risk="cross-repo"; fi
+            needs_contract="true"
+          fi
+
+          if grep -Eiq '(secret|token|key|cert|signature|signed|signing)' /tmp/changed-files.txt; then
+            risk="high"
+            needs_security="true"
+          fi
+
+          if grep -Eiq '^\.github/workflows/' /tmp/changed-files.txt; then
+            risk="high"
+            needs_ci="true"
+          fi
+
+          for label in "risk:low" "risk:medium" "risk:high" "risk:cross-repo" "needs:contract-review" "needs:security-review" "needs:release-review" "needs:ci-review" "agent-review:pending" "agent-review:run" "agent-review:router-only"; do
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
+          done
+
+          if [ "$EVENT_ACTION" = "synchronize" ]; then
+            for label in "agent-review:approved" "agent-review:changes-requested" "agent-review:needs-human" "agent-review:disputed"; do
+              gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
+            done
+          fi
+
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "risk:$risk" >/dev/null
+          [ "$needs_contract" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:contract-review" >/dev/null
+          [ "$needs_security" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:security-review" >/dev/null
+          [ "$needs_release" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:release-review" >/dev/null
+          [ "$needs_ci" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:ci-review" >/dev/null
+
+          if [ "$risk" = "low" ] && [ "$IS_DRAFT" != "true" ]; then
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "agent-review:router-only" >/dev/null
+          else
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "agent-review:pending" >/dev/null
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "agent-review:run" >/dev/null
+          fi
+
+          files_preview="$(sed -n '1,80p' /tmp/changed-files.txt)"
+          body="$(cat <<EOF
+          <!-- centurion-pr-router -->
+          ## PR Router
+
+          Risk: \`$risk\`
+
+          Review routing:
+          - contract: \`$needs_contract\`
+          - security: \`$needs_security\`
+          - release/deploy: \`$needs_release\`
+          - ci/workflow: \`$needs_ci\`
+
+          Changed files: \`$total\`
+
+          <details>
+          <summary>Changed files preview</summary>
+
+          \`\`\`
+          $files_preview
+          \`\`\`
+          </details>
+          EOF
+          )"
+
+          comment_id="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[] | select(.body | contains("<!-- centurion-pr-router -->")) | .id' | head -n 1 || true)"
+          if [ -n "$comment_id" ]; then
+            gh api "repos/$REPO/issues/comments/$comment_id" -X PATCH -f body="$body" >/dev/null
+          else
+            printf "%s" "$body" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
+          fi
+

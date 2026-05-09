@@ -1,0 +1,61 @@
+name: layer2-gate
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: layer2-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce Layer 2 review state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          set -euo pipefail
+          labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')"
+
+          has_label() {
+            printf "%s\n" "$labels" | grep -Fxq "$1"
+          }
+
+          if [ "$IS_DRAFT" = "true" ] && ! has_label "agent-review:approved"; then
+            echo "Draft PR is waiting for readiness or explicit Layer 2 approval."
+            exit 1
+          fi
+
+          if has_label "agent-review:changes-requested"; then
+            echo "Layer 2 requested changes."
+            exit 1
+          fi
+
+          if has_label "agent-review:needs-human"; then
+            echo "Layer 2 requires human review."
+            exit 1
+          fi
+
+          if has_label "agent-review:approved"; then
+            echo "Layer 2 approved this PR."
+            exit 0
+          fi
+
+          if has_label "risk:low" && has_label "agent-review:router-only"; then
+            echo "Low-risk router-only PR passes Layer 2 gate."
+            exit 0
+          fi
+
+          echo "Waiting for Layer 2 approval. Add agent-review:approved after review, or mark low-risk router-only."
+          exit 1
+
