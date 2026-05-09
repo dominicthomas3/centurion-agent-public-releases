@@ -36,9 +36,9 @@ jobs:
           ensure_label "risk:medium" "fbca04" "Router classified this PR as medium risk."
           ensure_label "risk:high" "d93f0b" "Router classified this PR as high risk."
           ensure_label "risk:cross-repo" "5319e7" "PR affects contracts or behavior shared across Centurion repos."
-          ensure_label "needs:contract-review" "5319e7" "Requires source-build or platform compatibility review."
-          ensure_label "needs:security-review" "b60205" "Requires signing, trust, secret, or security review."
-          ensure_label "needs:release-review" "1d76db" "Requires binary, checksum, release, or publishing review."
+          ensure_label "needs:contract-review" "5319e7" "Requires Platform/Agent contract compatibility review."
+          ensure_label "needs:security-review" "b60205" "Requires auth, billing, secret, or trust-boundary review."
+          ensure_label "needs:release-review" "1d76db" "Requires installer, release, deploy, or public mirror review."
           ensure_label "needs:ci-review" "c5def5" "Requires CI/build workflow review."
           ensure_label "agent-review:pending" "fbca04" "Waiting for Layer 2 review or router disposition."
           ensure_label "agent-review:run" "b60205" "Local Layer 2 runner should review this PR."
@@ -60,40 +60,45 @@ jobs:
           if [ "$total" = "0" ]; then
             risk="low"
           elif awk 'NF && $0 !~ /^docs\/|\.md$|^README\.md$|^NOTICE$|^LICENSE$/ { bad=1 } END { exit bad ? 0 : 1 }' /tmp/changed-files.txt; then
-            risk="high"
-            needs_release="true"
+            risk="medium"
           else
             risk="low"
           fi
 
-          if grep -Eiq '(checksum|sha256|signature|signed|signing|certificate|msi|exe|zip|artifact|binary|download|latest|release|installer|license|terms)' /tmp/changed-files.txt; then
-            risk="high"
-            needs_release="true"
-          fi
-
-          if grep -Eiq '(source|provenance|centurion-agent|centurion-platform|commit|gateway|download)' /tmp/changed-files.txt; then
-            if [ "$risk" != "high" ]; then risk="cross-repo"; fi
-            needs_contract="true"
-          fi
-
-          if grep -Eiq '(secret|token|key|cert|signature|signed|signing)' /tmp/changed-files.txt; then
+          if grep -Eiq '(^|/)(auth|billing|stripe|oauth|connectors|downloads|pairings|devices|llm-proxy|realtime|mcp-gateway|prisma|migrations)(/|$)|schema\.prisma|stripe|jwt|session|csrf|account-level|webhook|secret|credential|keyring' /tmp/changed-files.txt; then
             risk="high"
             needs_security="true"
           fi
 
+          if grep -Eiq 'packages/contracts|ui/vendor/contracts|proto/|schemas/|redeem-pairing|download.*dto|pairing|agent-jwt|agent\.gateway|/agent-ws|latest-msi|latest-exe|CENTURION_AGENT_DOWNLOAD_URL|CONTROL_PLANE' /tmp/changed-files.txt; then
+            risk="cross-repo"
+            needs_contract="true"
+          fi
+
+          if grep -Eiq '(^|/)(installer|release|dev-release|api-deploy|cdk|infra|\.github/workflows)(/|$)|Cargo\.lock|pnpm-lock\.yaml|package-lock\.json|Dockerfile|\.wxs|sign|velopack|public-releases' /tmp/changed-files.txt; then
+            if [ "$risk" != "cross-repo" ]; then risk="high"; fi
+            needs_release="true"
+          fi
+
           if grep -Eiq '^\.github/workflows/' /tmp/changed-files.txt; then
-            risk="high"
             needs_ci="true"
           fi
+
+          # Snapshot existing labels so we can decide whether to re-flag for
+          # review (avoids racing with the local Layer 2 runner, which clears
+          # agent-review:run and adds in-flight / terminal-state labels).
+          existing_labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+          has_existing() { printf "%s\n" "$existing_labels" | grep -Fxq "$1"; }
 
           for label in "risk:low" "risk:medium" "risk:high" "risk:cross-repo" "needs:contract-review" "needs:security-review" "needs:release-review" "needs:ci-review" "agent-review:pending" "agent-review:run" "agent-review:router-only"; do
             gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
           done
 
           if [ "$EVENT_ACTION" = "synchronize" ]; then
-            for label in "agent-review:approved" "agent-review:changes-requested" "agent-review:needs-human" "agent-review:disputed"; do
+            for label in "agent-review:approved" "agent-review:changes-requested" "agent-review:needs-human" "agent-review:disputed" "agent-review:in-flight"; do
               gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1 || true
             done
+            existing_labels=""
           fi
 
           gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "risk:$risk" >/dev/null
@@ -102,7 +107,16 @@ jobs:
           [ "$needs_release" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:release-review" >/dev/null
           [ "$needs_ci" = "true" ] && gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "needs:ci-review" >/dev/null
 
-          if [ "$risk" = "low" ] && [ "$IS_DRAFT" != "true" ]; then
+          # Do not re-flag review if a terminal review state already exists
+          # (approved / changes-requested / needs-human) or if a runner is
+          # mid-review (in-flight). The synchronize branch above already
+          # cleared these for new commits.
+          if has_existing "agent-review:approved" \
+             || has_existing "agent-review:changes-requested" \
+             || has_existing "agent-review:needs-human" \
+             || has_existing "agent-review:in-flight"; then
+            : # leave terminal/in-flight state alone
+          elif [ "$risk" = "low" ] && [ "$IS_DRAFT" != "true" ]; then
             gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "agent-review:router-only" >/dev/null
           else
             gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "agent-review:pending" >/dev/null
@@ -140,4 +154,3 @@ jobs:
           else
             printf "%s" "$body" | gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file -
           fi
-
