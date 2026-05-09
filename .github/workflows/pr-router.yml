@@ -87,7 +87,12 @@ jobs:
           # Snapshot existing labels so we can decide whether to re-flag for
           # review (avoids racing with the local Layer 2 runner, which clears
           # agent-review:run and adds in-flight / terminal-state labels).
-          existing_labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || true)"
+          # Use raw REST instead of `gh pr view --json labels` because the
+          # latter issues a GraphQL query that needs read:org scope, which
+          # GITHUB_TOKEN does not have. REST works with the default token.
+          existing_labels="$(gh api "repos/$REPO/issues/$PR_NUMBER" --jq '.labels[].name' 2>/dev/null || true)"
+          echo "Existing labels at trigger time:"
+          printf '  %s\n' $existing_labels
           has_existing() { printf "%s\n" "$existing_labels" | grep -Fxq "$1"; }
 
           for label in "risk:low" "risk:medium" "risk:high" "risk:cross-repo" "needs:contract-review" "needs:security-review" "needs:release-review" "needs:ci-review" "agent-review:pending" "agent-review:run" "agent-review:router-only"; do
