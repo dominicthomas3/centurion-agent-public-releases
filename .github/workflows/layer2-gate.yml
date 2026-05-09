@@ -25,11 +25,23 @@ jobs:
           IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -euo pipefail
-          labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')"
+          # Use raw REST instead of `gh pr view --json labels`. The latter
+          # issues a GraphQL query touching author/team fields that need
+          # read:org scope, which GITHUB_TOKEN lacks. REST works.
+          labels="$(gh api "repos/$REPO/issues/$PR_NUMBER" --jq '.labels[].name')"
 
           has_label() {
             printf "%s\n" "$labels" | grep -Fxq "$1"
           }
+
+          # Break-glass: agent-review:emergency-bypass passes the gate
+          # regardless of review state. Used when the local Layer 2 runner
+          # is down and a hotfix must merge. Auditable via the labels
+          # history (the label is timestamped to the actor who applied it).
+          if has_label "agent-review:emergency-bypass"; then
+            echo "::warning::Layer 2 gate bypassed via agent-review:emergency-bypass label. Auditable in labels history. Verify this is intentional."
+            exit 0
+          fi
 
           if [ "$IS_DRAFT" = "true" ] && ! has_label "agent-review:approved"; then
             echo "Draft PR is waiting for readiness or explicit Layer 2 approval."
@@ -56,6 +68,5 @@ jobs:
             exit 0
           fi
 
-          echo "Waiting for Layer 2 approval. Add agent-review:approved after review, or mark low-risk router-only."
+          echo "Waiting for Layer 2 approval. Add agent-review:approved after review, mark low-risk router-only, or apply agent-review:emergency-bypass for a hotfix when the runner is unavailable."
           exit 1
-

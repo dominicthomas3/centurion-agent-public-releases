@@ -47,6 +47,7 @@ jobs:
           ensure_label "agent-review:changes-requested" "d93f0b" "Layer 2 requested changes."
           ensure_label "agent-review:needs-human" "d93f0b" "Layer 2 requires a human decision."
           ensure_label "agent-review:disputed" "fbca04" "A Layer 2 finding is disputed and needs adjudication."
+          ensure_label "agent-review:emergency-bypass" "b60205" "Break-glass: bypass Layer 2 gate (auditable in labels history)."
 
           gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only > /tmp/changed-files.txt || true
           total="$(grep -cve '^[[:space:]]*$' /tmp/changed-files.txt || true)"
